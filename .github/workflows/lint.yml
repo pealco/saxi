@@ -39,5 +39,28 @@ jobs:
           key: ${{ runner.os }}-node-${{ matrix.node-version }}-${{ hashFiles('package-lock.json') }}
       - run: npm install --prefer-offline --no-audit  --no-fund --ignore-scripts
       - run: npm test
+  packaging:
+    name: Git install - ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26.x
+      - run: npm install --global npm@12.2.0
+      - name: Install from Git into a clean global prefix
+        run: npm install --global "git+file://${GITHUB_WORKSPACE}" --allow-git=root --prefix "$RUNNER_TEMP/saxi" --cache "$RUNNER_TEMP/saxi-cache" --no-audit --no-fund
+      - name: Run the installed CLI without development dependencies
+        run: |
+          "$RUNNER_TEMP/saxi/bin/saxi" --version
+          "$RUNNER_TEMP/saxi/bin/saxi" --help
+          test ! -d "$RUNNER_TEMP/saxi/lib/node_modules/saxi/node_modules/vitest"
+          test -f "$RUNNER_TEMP/saxi/lib/node_modules/saxi/dist/ui/index.html"
 permissions:
   contents: read
