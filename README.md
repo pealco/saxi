@@ -16,6 +16,33 @@ easy-to-use interface, and is exactingly precise.
 
 ### Installation
 
+#### Install this fork from GitHub
+
+With Node.js 26 and npm 12:
+
+```bash
+npm install -g github:pealco/saxi --allow-git=root
+saxi --help
+```
+
+If you have npm 11, upgrade it first with `npm install -g npm@12`.
+npm 11.17.0 incorrectly runs Git dependency preparation in global mode,
+which can fail with `biome: command not found` or remove dependencies from
+the installation in progress. npm 12 includes the
+[upstream fix](https://github.com/npm/pacote/pull/494).
+Installing Biome globally does not resolve that npm bug.
+
+npm 12 requires an explicit opt-in for Git dependencies. `--allow-git=root`
+allows directly requested Git packages without allowing transitive Git
+dependencies. To save this preference and use
+`npm install -g github:pealco/saxi` without the flag, run
+`npm config set allow-git=root --location=user` once.
+
+On macOS, npm 12 may block the optional `wake-lock` native build. To enable
+sleep prevention while plotting, add `--allow-scripts=wake-lock` to the
+installation command. Otherwise saxi warns about sleep prevention when a
+plot starts.
+
 #### For Raspberry Pi 2 / 3 / 4 / 5
 
 1. **Install Node.js (if not already installed):**
