@@ -88,6 +88,21 @@ export function PresetControls({
     }
   }
 
+  async function load() {
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const preset: Preset = await requestPresets(`/presets/${encodeURIComponent(selected)}/load`, { method: "POST" });
+      onLoad(preset.options);
+      setMessage(`Loaded “${preset.name}”.`);
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const preset = presets.find((item) => item.name === selected);
   return (
     <div className="preset-controls">
@@ -110,15 +125,7 @@ export function PresetControls({
         ))}
       </select>
       <div className="button-row">
-        <button
-          type="button"
-          disabled={!preset || busy || disabled}
-          onClick={() => {
-            if (!preset) return;
-            onLoad(preset.options);
-            setMessage(`Loaded “${preset.name}”.`);
-          }}
-        >
+        <button type="button" disabled={!preset || busy || disabled} onClick={() => void load()}>
           Load
         </button>
         <button type="button" disabled={busy} onClick={() => void refresh()}>

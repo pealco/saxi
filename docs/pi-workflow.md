@@ -22,6 +22,8 @@ The same actions are available through the HTTP API:
 - `PUT /presets/:name` saves settings as JSON. The response to `GET /presets`
   contains the settings format in each entry's `options` field.
 - `DELETE /presets/:name` deletes a saved setup.
+- `POST /presets/:name/load` loads the latest saved setup, applies its hardware
+  model and returns its settings. It refuses to load during a plot or update.
 
 Names are URL-encoded. These endpoints are for the same trusted local network as
 the plot controls; browser writes from unrelated origins are rejected.

@@ -1235,7 +1235,6 @@ function Root() {
                       type: "SET_PLAN_OPTION",
                       value: { ...options, paperSize: new PaperSize(options.paperSize.size) },
                     });
-                    if (options.hardware !== state.deviceInfo?.hardware) driver?.changeHardware(options.hardware);
                   }}
                 />
               </div>

@@ -129,6 +129,24 @@ export async function startServer(
     res.status(204).end();
   });
 
+  app.post("/presets/:name/load", async (req, res) => {
+    const preset = (await presets.list()).find((item) => item.name === req.params.name);
+    if (!preset) {
+      res.status(404).json({ error: "Preset no longer exists. Refresh the list." });
+      return;
+    }
+    if (plotting || updateLeaseUntil > Date.now()) {
+      res.status(409).json({ error: "Wait until the plot or update finishes before loading a preset." });
+      return;
+    }
+    if (currentHardware !== preset.options.hardware) {
+      currentHardware = preset.options.hardware;
+      ebb?.changeHardware(currentHardware);
+      broadcast({ c: "dev", p: getDeviceInfo(ebb, com, currentHardware) });
+    }
+    res.json(preset);
+  });
+
   // Reserve an idle service before deployment so a new plot cannot race an update.
   app.post("/maintenance", async (req, res) => {
     if (plotting || updateLeaseUntil > Date.now()) {

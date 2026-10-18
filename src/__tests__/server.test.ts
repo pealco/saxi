@@ -117,6 +117,7 @@ describe("Plot Endpoint Test Suite", () => {
         .send({ ...options, penUpHeight: 42 })
         .expect(200);
       expect((await request(server).get("/presets")).body[0].options.penUpHeight).toBe(42);
+      expect((await request(server).post("/presets/Brush%20pen/load").expect(200)).body.options.penUpHeight).toBe(42);
       await request(server).put("/presets/Other").set("Origin", "https://unrelated.example").send(options).expect(403);
       await request(server).delete("/presets/Brush%20pen").expect(204);
       expect((await request(server).get("/presets")).body).toEqual([]);
@@ -128,6 +129,18 @@ describe("Plot Endpoint Test Suite", () => {
         .put("/presets/Large")
         .send({ extra: "x".repeat(40000) })
         .expect(413);
+    });
+
+    test("refuse loading settings during a plot or deployment", async () => {
+      await request(server).put("/presets/Busy").send(presetOptions(defaultPlanOptions)).expect(200);
+      await request(server).post("/plot").send(COMPLEX_PLAN).expect(200);
+      await request(server).post("/presets/Busy/load").expect(409);
+      await waitForPlottingComplete(server);
+      await request(server).post("/maintenance").send({ updating: true }).expect(200);
+      await request(server).post("/presets/Busy/load").expect(409);
+      await request(server).delete("/maintenance").expect(204);
+      await request(server).delete("/presets/Busy").expect(204);
+      await request(server).post("/presets/Busy/load").expect(404);
     });
   });
 
