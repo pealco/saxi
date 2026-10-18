@@ -1,9 +1,14 @@
 import type { Server } from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { AddressInfo } from "node:net";
 import request from "supertest";
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import WebSocket from "ws";
 import { AxidrawFast, plan } from "../planning.js";
+import { defaultPlanOptions } from "../planning.js";
+import { presetOptions } from "../preset-options.js";
 import { createMockSerialPort, mockSerialPortInstance } from "./mocks/serialport.js";
 
 // Mock SerialPortSerialPort using shared implementation
@@ -19,7 +24,7 @@ vi.mock("../server", async () => {
   return {
     ...original,
     startServer: (port: number, hardware?: string, ...args: any[]) =>
-      original.startServer(port, hardware, "/dev/ttyMOCK", ...args),
+      original.startServer(port, hardware, "/dev/ttyMOCK", ...args.slice(1)),
     waitForEbb: vi.fn().mockResolvedValue("/dev/ttyMOCK"),
   };
 });
@@ -61,9 +66,11 @@ async function waitForCommandsLogged(command = "EM,1,1", timeout = 5000): Promis
 
 describe("Plot Endpoint Test Suite", () => {
   let server: Server;
+  let dataDirectory: string;
 
   beforeAll(async () => {
-    server = await startServer(0); // Use port 0 for dynamic port assignment
+    dataDirectory = await mkdtemp(path.join(tmpdir(), "saxi-server-test-"));
+    server = await startServer(0, undefined, "", false, "200mb", dataDirectory);
   });
 
   afterAll(async () => {
@@ -72,6 +79,7 @@ describe("Plot Endpoint Test Suite", () => {
         server.close(() => resolve());
       });
     }
+    await rm(dataDirectory, { recursive: true, force: true });
   });
 
   // Reset state before each test to ensure isolation
@@ -90,6 +98,76 @@ describe("Plot Endpoint Test Suite", () => {
       // Check the commands that were sent to the mock serial port
       expect(mockSerialPortInstance.commands.length).toBeGreaterThan(0);
       expect(mockSerialPortInstance.commands).toContain("EM,1,1");
+    });
+  });
+
+  describe("Shared presets", () => {
+    test("save, share, validate, update and delete a named setup", async () => {
+      const options = presetOptions(defaultPlanOptions);
+      await request(server).put("/presets/Brush%20pen").send(options).expect(200);
+      const list = await request(server).get("/presets").expect(200);
+      expect(list.headers["cache-control"]).toBe("no-store");
+      expect(list.body).toContainEqual({ name: "Brush pen", options });
+      await request(server)
+        .put("/presets/Brush%20pen")
+        .send({ ...options, penUpHeight: 101 })
+        .expect(400);
+      await request(server)
+        .put("/presets/Brush%20pen")
+        .send({ ...options, penUpHeight: 42 })
+        .expect(200);
+      expect((await request(server).get("/presets")).body[0].options.penUpHeight).toBe(42);
+      await request(server).put("/presets/Other").set("Origin", "https://unrelated.example").send(options).expect(403);
+      await request(server).delete("/presets/Brush%20pen").expect(204);
+      expect((await request(server).get("/presets")).body).toEqual([]);
+    });
+
+    test("reject oversized settings and blank names", async () => {
+      await request(server).put("/presets/%20").send(presetOptions(defaultPlanOptions)).expect(400);
+      await request(server)
+        .put("/presets/Large")
+        .send({ extra: "x".repeat(40000) })
+        .expect(413);
+    });
+  });
+
+  describe("Deployment reservation", () => {
+    test("keep the reservation through a restart until explicitly released", async () => {
+      await request(server).post("/maintenance").send({ updating: true }).expect(200);
+      const restarted = await startServer(0, undefined, "", false, "200mb", dataDirectory);
+      try {
+        await request(restarted).post("/plot").send(SIMPLE_PLAN).expect(503);
+        await request(restarted).delete("/maintenance").expect(204);
+      } finally {
+        await new Promise<void>((resolve) => restarted.close(() => resolve()));
+        await request(server).delete("/maintenance").expect(204);
+      }
+    });
+
+    test("expire an abandoned reservation", async () => {
+      await request(server).post("/maintenance").send({ updating: true }).expect(200);
+      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6 * 60 * 1000);
+      try {
+        await request(server).post("/maintenance").send({ updating: true }).expect(200);
+      } finally {
+        clock.mockRestore();
+        await request(server).delete("/maintenance").expect(204);
+      }
+    });
+
+    test("reserve an idle server, reject new plots, and release it", async () => {
+      await request(server).post("/maintenance").send({ updating: true }).expect(200);
+      await request(server).post("/plot").send(SIMPLE_PLAN).expect(503);
+      await request(server).post("/maintenance").send({ updating: true }).expect(409);
+      await request(server).delete("/maintenance").expect(204);
+      await request(server).post("/plot").send(SIMPLE_PLAN).expect(200);
+      await waitForPlottingComplete(server);
+    });
+
+    test("refuse deployment while a plot is running", async () => {
+      await request(server).post("/plot").send(COMPLEX_PLAN).expect(200);
+      await request(server).post("/maintenance").send({ updating: true }).expect(409);
+      await waitForPlottingComplete(server);
     });
   });
 

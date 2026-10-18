@@ -59,6 +59,9 @@ If you encounter an `EACCES` error when installing the package globally, see [Re
 
 ### Usage
 
+For shared presets, completion sound and repeatable updates on a dedicated Pi,
+see [Shared Raspberry Pi setup](docs/pi-workflow.md).
+
 Start the `saxi` server from the terminal:
 
 ```bash

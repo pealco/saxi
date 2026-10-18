@@ -22,6 +22,7 @@
     "saxi": "cli.mjs"
   },
   "scripts": {
+    "update:pi": "bash scripts/update-pi.sh",
     "prebuild": "npm run lint",
     "lint": "biome lint src",
     "format": "biome format --write",

@@ -335,7 +335,7 @@ select[multiple]:focus option:checked {
 }
 
 .spacer {
-  height: 200px;
+  height: 250px;
 }
 
 /* MORE section */
@@ -446,3 +446,11 @@ summary:focus {
   text-align: center;
   color: var(--red);
 }
+
+.preset-controls select { width: 100%; margin: 0.25rem 0 0.5rem; }
+.preset-controls label { display: block; text-align: left; }
+.preset-controls .button-row { margin-bottom: 0.5rem; }
+.settings-note { font-size: 11px; line-height: 1.5; }
+.settings-error { color: #9b3131; font-size: 12px; line-height: 1.5; }
+.completion-sound { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem; }
+.completion-sound button { font-size: 11px; padding: 0.25rem; }

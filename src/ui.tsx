@@ -18,6 +18,8 @@ import React, {
 } from "react";
 import { createRoot } from "react-dom/client";
 import { PaperSize } from "./paper-size.js";
+import { playCompletionSound } from "./completion-sound.js";
+import { PresetControls } from "./preset-controls.js";
 import { Device, defaultPlanOptions, Plan, type PlanOptions, type TransferredMotion, XYMotion } from "./planning.js";
 import useComponentSize from "./useComponentSize.js";
 
@@ -1062,6 +1064,37 @@ function Root() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const { isPlanning, plan, setPlan } = usePlan(state.paths, state.planOptions);
   const [isLoadingFile, setIsLoadingFile] = useState(false);
+  const audio = useRef<AudioContext | null>(null);
+  const [soundEnabled, setSoundEnabled] = useState(false);
+  const [soundError, setSoundError] = useState("");
+
+  useEffect(
+    () => () => {
+      void audio.current?.close().catch(console.warn);
+    },
+    [],
+  );
+
+  async function toggleSound() {
+    setSoundError("");
+    try {
+      if (soundEnabled) {
+        const context = audio.current;
+        audio.current = null;
+        setSoundEnabled(false);
+        await context?.close();
+        return;
+      }
+      // Create/resume from the click so browsers permit the later completion chime.
+      audio.current ??= new AudioContext();
+      await audio.current.resume();
+      if (audio.current.state !== "running") throw new Error("Click again to allow sound in this browser.");
+      setSoundEnabled(true);
+      playCompletionSound(audio.current);
+    } catch (error) {
+      setSoundError((error as Error).message);
+    }
+  }
 
   useEffect(() => {
     window.localStorage.setItem("planOptions", JSON.stringify(state.planOptions));
@@ -1073,8 +1106,12 @@ function Root() {
     driver.onprogress = (motionIdx: number) => {
       dispatch({ type: "SET_PROGRESS", motionIdx });
     };
-    driver.oncancelled = driver.onfinished = () => {
+    driver.oncancelled = () => {
       dispatch({ type: "SET_PROGRESS", motionIdx: null });
+    };
+    driver.onfinished = () => {
+      dispatch({ type: "SET_PROGRESS", motionIdx: null });
+      if (audio.current?.state === "running") playCompletionSound(audio.current);
     };
     driver.ondevinfo = (devInfo: DeviceInfo) => {
       dispatch({ type: "SET_DEVICE_INFO", value: devInfo });
@@ -1186,6 +1223,24 @@ function Root() {
               hardware={(driver as WebSerialDriver)?.ebb?.hardware ?? state.planOptions.hardware}
             />
           )}
+          {!IS_WEB && (
+            <details>
+              <summary className="section-header">presets</summary>
+              <div className="section-body">
+                <PresetControls
+                  options={state.planOptions}
+                  disabled={state.progress !== null || !state.connected}
+                  onLoad={(options) => {
+                    dispatch({
+                      type: "SET_PLAN_OPTION",
+                      value: { ...options, paperSize: new PaperSize(options.paperSize.size) },
+                    });
+                    if (options.hardware !== state.deviceInfo?.hardware) driver?.changeHardware(options.hardware);
+                  }}
+                />
+              </div>
+            </details>
+          )}
           <div className="section-header">pen</div>
           <div className="section-body">
             <PenHeight state={state} driver={driver} />
@@ -1218,6 +1273,26 @@ function Root() {
                 paused={state.paused}
               />
               <PlotButtons plan={plan} isPlanning={isPlanning} state={state} driver={driver} />
+              <div className="completion-sound">
+                <label className="flex-checkbox">
+                  <input type="checkbox" checked={soundEnabled} onChange={() => void toggleSound()} />
+                  completion sound
+                </label>
+                <button
+                  type="button"
+                  disabled={!soundEnabled}
+                  onClick={() => {
+                    if (audio.current) playCompletionSound(audio.current);
+                  }}
+                >
+                  Test sound
+                </button>
+              </div>
+              {soundError && (
+                <p role="alert" className="settings-error">
+                  {soundError}
+                </p>
+              )}
             </div>
           </div>
         </div>

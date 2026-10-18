@@ -6,7 +6,9 @@
  */
 
 import http from "node:http";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { autoDetect } from "@serialport/bindings-cpp";
@@ -19,6 +21,8 @@ import { WebSocketServer } from "ws";
 import { createMockSerialPort } from "./__tests__/mocks/serialport.js";
 import { EBB, type EBBPort, type Hardware } from "./ebb.js";
 import { type Motion, PenMotion, Plan } from "./planning.js";
+import { validatePresetOptions } from "./preset-options.js";
+import { PresetStore, validatePresetName } from "./preset-store.js";
 import { SerialPortSerialPort } from "./serialport-serialport.js";
 import * as _self from "./server.js"; // use self-import for test mocking
 import { formatDuration } from "./util.js";
@@ -52,10 +56,12 @@ export async function startServer(
   com: Com = "",
   enableCors = false,
   maxPayloadSize = "200mb",
+  dataDirectory = process.env.SAXI_DATA_DIR ?? path.join(homedir(), ".local", "share", "saxi"),
 ) {
   const app = express();
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   app.use("/", express.static(path.join(__dirname, "..", "ui")));
+  app.use("/presets", express.json({ limit: "32kb" }));
   app.use(express.json({ limit: maxPayloadSize }));
   if (enableCors) {
     app.use(cors());
@@ -73,6 +79,83 @@ export async function startServer(
   let currentPlan: Plan | null = null;
   let plotting = false;
   let controller: AbortController | null = null;
+  let updateLeaseUntil = 0;
+  const maintenanceFile = path.join(dataDirectory, "maintenance-until");
+  try {
+    updateLeaseUntil = Number(await readFile(maintenanceFile, "utf8"));
+    if (!Number.isFinite(updateLeaseUntil)) throw new Error("Invalid update reservation");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const presets = new PresetStore(path.join(dataDirectory, "presets.json"));
+
+  app.get("/presets", async (_req, res) => {
+    res.set("Cache-Control", "no-store").json(await presets.list());
+  });
+
+  app.use(["/presets", "/maintenance"], (req, res, next) => {
+    if (req.method === "GET") return next();
+    const origin = req.get("origin");
+    if (origin && origin !== `${req.protocol}://${req.get("host")}`) {
+      res.status(403).json({ error: "Use Saxi from its own address" });
+      return;
+    }
+    next();
+  });
+
+  app.put("/presets/:name", async (req, res) => {
+    let name: string;
+    let options: ReturnType<typeof validatePresetOptions>;
+    try {
+      name = validatePresetName(req.params.name);
+      options = validatePresetOptions(req.body);
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+      return;
+    }
+    await presets.update(name, options);
+    res.json({ name, options });
+  });
+
+  app.delete("/presets/:name", async (req, res) => {
+    let name: string;
+    try {
+      name = validatePresetName(req.params.name);
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+      return;
+    }
+    await presets.update(name, null);
+    res.status(204).end();
+  });
+
+  // Reserve an idle service before deployment so a new plot cannot race an update.
+  app.post("/maintenance", async (req, res) => {
+    if (plotting || updateLeaseUntil > Date.now()) {
+      res.status(409).json({ error: plotting ? "A plot is in progress" : "An update is already in progress" });
+      return;
+    }
+    if (req.body?.updating !== true) {
+      res.status(400).json({ error: "Expected updating: true" });
+      return;
+    }
+    updateLeaseUntil = Date.now() + 5 * 60 * 1000;
+    try {
+      await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
+      await writeFile(`${maintenanceFile}.tmp`, String(updateLeaseUntil), { mode: 0o600 });
+      await rename(`${maintenanceFile}.tmp`, maintenanceFile);
+    } catch (error) {
+      updateLeaseUntil = 0;
+      throw error;
+    }
+    res.json({ updating: true });
+  });
+
+  app.delete("/maintenance", async (_req, res) => {
+    await rm(maintenanceFile, { force: true });
+    updateLeaseUntil = 0;
+    res.status(204).end();
+  });
 
   wss.on("connection", (ws) => {
     clients.push(ws);
@@ -120,6 +203,10 @@ export async function startServer(
    * /plot POST endpoint. Receive a plan on the POST body, and execute it.
    */
   app.post("/plot", async (req: Request, res: Response) => {
+    if (updateLeaseUntil > Date.now()) {
+      res.status(503).send("Saxi is being updated. Try again shortly.");
+      return;
+    }
     if (plotting) {
       console.log("Received plot request, but a plot is already in progress!");
       res.status(400).send("Plot in progress");
