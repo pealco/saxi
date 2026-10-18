@@ -1,5 +1,3 @@
-import { vi } from "vitest";
-
 // Shared command tracker
 export const mockSerialPortInstance = {
   commands: [] as string[],
@@ -52,8 +50,8 @@ export const createMockSerialPort = () => {
         }
       },
     }),
-    open: vi.fn().mockResolvedValue(undefined),
-    close: vi.fn().mockResolvedValue(undefined),
-    addEventListener: vi.fn(),
+    open: async () => undefined,
+    close: async () => undefined,
+    addEventListener: () => undefined,
   };
 };
