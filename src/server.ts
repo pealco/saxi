@@ -31,7 +31,7 @@ type Com = string;
  * @param com
  * @returns
  */
-const getDeviceInfo = (ebb: EBB | null, _com: Com, fallbackHardware: Hardware = "v3") => {
+const getDeviceInfo = (ebb: EBB | null, _com: Com, fallbackHardware: Hardware = "brushless") => {
   // biome-ignore lint/suspicious/noExplicitAny: private member access
   const portPath = (ebb?.port as any)?._path ?? null;
   return { path: portPath, hardware: ebb?.hardware ?? fallbackHardware };
@@ -48,7 +48,7 @@ const getDeviceInfo = (ebb: EBB | null, _com: Com, fallbackHardware: Hardware = 
  */
 export async function startServer(
   port: number,
-  hardware: Hardware = "v3",
+  hardware: Hardware = "brushless",
   com: Com = "",
   enableCors = false,
   maxPayloadSize = "200mb",
@@ -348,7 +348,7 @@ export async function waitForEbb(): Promise<Com> {
   }
 }
 
-async function* ebbs(path?: string, hardware: Hardware = "v3") {
+async function* ebbs(path?: string, hardware: Hardware = "brushless") {
   while (true) {
     try {
       const com: Com = path || (await _self.waitForEbb()); // use self-import for test mocking

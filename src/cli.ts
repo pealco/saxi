@@ -30,7 +30,7 @@ export function cli(argv: string[]): void {
     .option("hardware", {
       describe: "select hardware type",
       choices: ["v3", "brushless", "nextdraw-2234"] as const,
-      default: "v3",
+      default: "brushless",
       coerce: (value) => value as Hardware,
     })
     .option("device", {

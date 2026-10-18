@@ -64,7 +64,7 @@ export const defaultPlanOptions: PlanOptions = {
   cropToMargins: true,
 
   minimumPathLength: 0,
-  hardware: "v3",
+  hardware: "brushless",
   penHome: { x: 0, y: 0 },
 };
 
@@ -95,7 +95,7 @@ interface ToolingProfile {
   penDropDuration: number;
 }
 
-export const Device = (hardware = "v3"): Device => {
+export const Device = (hardware = "brushless"): Device => {
   if (hardware === "brushless") return AxidrawBrushless;
   if (hardware === "nextdraw-2234") return NextDraw2234;
   if (hardware === "idraw-h-se") return Axidraw; // https://github.com/alexrudd2/saxi/issues/298

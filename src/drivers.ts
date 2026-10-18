@@ -43,7 +43,7 @@ export class WebSerialDriver extends BaseDriver {
   private _cancelRequested = false;
   private _disconnectHandler: ((event: Event) => void) | null = null;
 
-  public static async connect(port?: SerialPort, hardware: Hardware = "v3") {
+  public static async connect(port?: SerialPort, hardware: Hardware = "brushless") {
     if (!port)
       // biome-ignore lint/style/noParameterAssign: trivial
       port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x04d8, usbProductId: 0xfd92 }] });

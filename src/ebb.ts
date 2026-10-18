@@ -86,7 +86,7 @@ export class EBB {
 
   public firmwareVersion!: [number, number, number];
 
-  private constructor(port: EBBPort, hardware: Hardware = "v3") {
+  private constructor(port: EBBPort, hardware: Hardware = "brushless") {
     this.hardware = hardware;
     this.port = port;
     if (!port.readable || !port.writable) {
@@ -145,7 +145,7 @@ export class EBB {
       });
   }
 
-  public static async create(port: EBBPort, hardware: Hardware = "v3"): Promise<EBB> {
+  public static async create(port: EBBPort, hardware: Hardware = "brushless"): Promise<EBB> {
     const ebb = new EBB(port, hardware);
     const versionString = await ebb.query("V");
     console.log(`Firmware version: ${versionString}`);

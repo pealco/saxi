@@ -38,7 +38,8 @@ describe("EBB", () => {
   it("executePenMotion rounds S2 duration and rate to integers", async () => {
     const port = new SerialPortSerialPort("/dev/ebb");
     await port.open({ baudRate: 9600 });
-    const ebb = await EBB.create(port, "brushless");
+    const ebb = await EBB.create(port);
+    expect(ebb.hardware).toBe("brushless");
 
     // 0.07 * 1000 === 70.00000000000001 in IEEE-754 floating-point
     await ebb.executePenMotion(new PenMotion(8280, 11808, 0.07));

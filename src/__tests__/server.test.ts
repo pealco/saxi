@@ -18,7 +18,7 @@ vi.mock("../server", async () => {
   const original = (await vi.importActual("../server")) as any;
   return {
     ...original,
-    startServer: (port: number, hardware = "v3", ...args: any[]) =>
+    startServer: (port: number, hardware?: string, ...args: any[]) =>
       original.startServer(port, hardware, "/dev/ttyMOCK", ...args),
     waitForEbb: vi.fn().mockResolvedValue("/dev/ttyMOCK"),
   };
@@ -169,23 +169,27 @@ describe("Plot Endpoint Test Suite", () => {
     test("persist hardware change via WebSocket", async () => {
       const { port } = server.address() as AddressInfo;
       const ws = new WebSocket(`ws://127.0.0.1:${port}`);
-      await new Promise<void>((resolve, reject) => {
-        ws.once("open", () => resolve());
+      const defaultDev = await new Promise<{ path: string | null; hardware: string }>((resolve, reject) => {
         ws.once("error", reject);
+        ws.on("message", (data) => {
+          const msg = JSON.parse(data.toString());
+          if (msg.c === "dev") resolve(msg.p);
+        });
       });
+      expect(defaultDev.hardware).toBe("brushless");
 
       const devUpdate = new Promise<{ path: string | null; hardware: string }>((resolve) => {
         ws.on("message", (data) => {
           const msg = JSON.parse(data.toString());
-          if (msg.c === "dev" && msg.p.hardware === "brushless") {
+          if (msg.c === "dev" && msg.p.hardware === "v3") {
             resolve(msg.p);
           }
         });
       });
 
-      ws.send(JSON.stringify({ c: "changeHardware", p: { hardware: "brushless" } }));
+      ws.send(JSON.stringify({ c: "changeHardware", p: { hardware: "v3" } }));
       const devInfo = await devUpdate;
-      expect(devInfo.hardware).toBe("brushless");
+      expect(devInfo.hardware).toBe("v3");
 
       // New client connections should also receive the updated hardware
       const ws2 = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -196,10 +200,10 @@ describe("Plot Endpoint Test Suite", () => {
           if (msg.c === "dev") resolve(msg.p);
         });
       });
-      expect(initialDev.hardware).toBe("brushless");
+      expect(initialDev.hardware).toBe("v3");
 
       // Restore default hardware for subsequent tests
-      ws.send(JSON.stringify({ c: "changeHardware", p: { hardware: "v3" } }));
+      ws.send(JSON.stringify({ c: "changeHardware", p: { hardware: "brushless" } }));
       ws.close();
       ws2.close();
     });
