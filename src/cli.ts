@@ -208,7 +208,7 @@ export function cli(argv: string[]): void {
           pathJoinRadius: args["path-join-radius"],
           pointJoinRadius: args["point-join-radius"],
         };
-        const p = replan(lines, planOptions);
+        const p = await replan(lines, planOptions);
         console.log(`${p.motions.length} motions, estimated duration: ${formatDuration(p.duration())}`);
         console.log("connecting to plotter...");
         const ebb = await connectEBB(args.hardware, args.device);

@@ -17,10 +17,11 @@ import React, {
   useState,
 } from "react";
 import { createRoot } from "react-dom/client";
+import type { PlannerResponse } from "./background-planner.js";
 import { PaperSize } from "./paper-size.js";
 import { playCompletionSound } from "./completion-sound.js";
 import { PresetControls } from "./preset-controls.js";
-import { Device, defaultPlanOptions, Plan, type PlanOptions, type TransferredMotion, XYMotion } from "./planning.js";
+import { Device, defaultPlanOptions, Plan, type PlanOptions, XYMotion } from "./planning.js";
 import useComponentSize from "./useComponentSize.js";
 
 import { formatDuration } from "./util.js";
@@ -168,26 +169,43 @@ const usePlan = (paths: Path[] | null, planOptions: PlanOptions) => {
         return () => {};
       }
     }
-    lastPaths.current = paths;
     const worker = new Worker("background-planner.js");
+    lastPlan.current = null;
+    setPlan(null);
     setIsPlanning(true);
-    console.time("posting to worker");
-    // FIXME: planOptions contains Set objects which get converted to empty objects {}
-    // during structured cloning. Should use: { paths, planOptions: JSON.parse(serialize(planOptions)) }
-    worker.postMessage({ paths, planOptions });
-    console.timeEnd("posting to worker");
-    const listener = (m: MessageEvent<TransferredMotion[]>) => {
-      console.time("deserializing");
-      const plan = Plan.fromTransferable(m.data);
-      console.timeEnd("deserializing");
+    const fail = (error: unknown) => {
+      console.error("Planning failed", error);
+      worker.terminate();
+      setIsPlanning(false);
+      alert("Unable to plan this drawing. Check the drawing and settings, then try again.");
+    };
+    const listener = (m: MessageEvent<PlannerResponse>) => {
+      if ("error" in m.data) {
+        fail(m.data.error);
+        return;
+      }
+      let plan: Plan;
+      try {
+        plan = Plan.fromTransferable(m.data.motions);
+      } catch (error) {
+        fail(error);
+        return;
+      }
       setPlan(plan);
       lastPlan.current = plan;
+      lastPaths.current = paths;
       lastPlanOptions.current = planOptions;
       setIsPlanning(false);
+      worker.terminate();
     };
     worker.addEventListener("message", listener);
+    worker.addEventListener("error", fail);
+    worker.addEventListener("messageerror", fail);
+    worker.postMessage({ paths, planOptions });
     return () => {
       worker.removeEventListener("message", listener);
+      worker.removeEventListener("error", fail);
+      worker.removeEventListener("messageerror", fail);
       worker.terminate();
       setIsPlanning(false);
     };
