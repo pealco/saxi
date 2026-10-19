@@ -47,7 +47,8 @@ function scaleToFit(pointLists: Vec2[][], targetMin: Vec2, targetMax: Vec2): Vec
   const availHeightMm = targetMax.y - targetMin.y;
   const scaleFitX = availWidthMm / (max.x - min.x);
   const scaleFitY = availHeightMm / (max.y - min.y);
-  const scale = Math.min(scaleFitX, scaleFitY);
+  // A drawing at one location has no extent to scale; place it at the page center.
+  const scale = max.x === min.x && max.y === min.y ? 1 : Math.min(scaleFitX, scaleFitY);
   const targetCenter = vadd(targetMin, vmul(vsub(targetMax, targetMin), 0.5));
   const offset = vsub(targetCenter, vmul(vsub(max, min), scale * 0.5));
   return pointLists.map((pl) => pl.map((p) => vadd(vmul(vsub(p, min), scale), offset)));

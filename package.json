@@ -32,7 +32,17 @@
     "start": "npm run build && node cli.mjs",
     "start-webserial": "cross-env IS_WEB=1 SAXI_HOT_RELOAD=1 npm run build:ui",
     "deploy": "node -e \"require('fs').rmSync('./dist/ui', { recursive: true, force: true, maxRetries: process.platform === 'win32' ? 10 : 0 })\" && cross-env IS_WEB=1 npm run build:ui && gh-pages --dist dist/ui",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:routing": "node tools/build-routing-wasm.mjs --embed",
+    "eval:routing": "node tools/benchmark-routing.mjs",
+    "eval:routing:physical": "node tools/benchmark-physical-routing.mjs",
+    "eval:routing:settings": "node tools/benchmark-routing-settings.mjs",
+    "eval:routing:total-time": "node tools/benchmark-routing-total-time.mjs",
+    "eval:routing:rollout": "node tools/benchmark-rollout-routing.mjs",
+    "eval:routing:rollout:check": "node tools/check-rollout-routing.mjs",
+    "eval:routing:wasm:build": "node tools/build-routing-wasm.mjs",
+    "eval:routing:wasm:check": "node tools/check-routing-kernel.mjs --settings",
+    "eval:routing:wasm": "node tools/benchmark-routing-wasm.mjs"
   },
   "author": "Jeremy Rose <nornagon@nornagon.net>",
   "license": "AGPL-3.0-only",

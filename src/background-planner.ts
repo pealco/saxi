@@ -3,16 +3,18 @@
  * Meant to be invoked through the Worker interface.
  */
 import { replan } from "./massager.js";
-import { XYMotion } from "./planning.js";
+import type { TransferredMotion } from "./planning.js";
 
-self.addEventListener("message", (m) => {
+export type PlannerResponse = { motions: TransferredMotion[] } | { error: string };
+
+self.addEventListener("message", async (m) => {
   const { paths, planOptions } = m.data;
-  const plan = replan(paths, planOptions);
-  console.time("serializing");
-  const motions = plan.toTransferable();
-  const buffers = plan.motions
-    .filter((m): m is XYMotion => m instanceof XYMotion)
-    .flatMap((m) => [m.cols.buffer, m.ts.buffer, m.ss.buffer]);
-  console.timeEnd("serializing");
-  self.postMessage(motions, { transfer: buffers });
+  try {
+    const plan = await replan(paths, planOptions);
+    const motions = plan.toTransferable();
+    const buffers = motions.filter((m) => m.type === "xy").flatMap((m) => [m.cols, m.ts, m.ss]);
+    self.postMessage({ motions } satisfies PlannerResponse, { transfer: buffers });
+  } catch (error) {
+    self.postMessage({ error: error instanceof Error ? error.message : String(error) } satisfies PlannerResponse);
+  }
 });

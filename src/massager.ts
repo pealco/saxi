@@ -1,6 +1,7 @@
 import type { Path } from "flatten-svg";
 import { elideShorterThan, merge as joinNearbyPaths, reorder as sortPaths } from "optimize-paths";
 import { Device, type Plan, type PlanOptions, plan } from "./planning.js";
+import { optimizePaths } from "./routing.js";
 import { cropToMargins, dedupPoints, scaleToPaper } from "./util.js";
 import { type Vec2, vmul, vrot } from "./vec.js";
 
@@ -10,15 +11,9 @@ const svgUnitsPerInch = 96;
 const mmPerInch = 25.4;
 const mmPerSvgUnit = mmPerInch / svgUnitsPerInch;
 
-/**
- * Create a plan based on new vectors and plan options
- * @param inPaths
- * @param planOptions
- * @returns
- */
-export function replan(inPaths: Path[], planOptions: PlanOptions): Plan {
+/** Apply the drawing settings and return the drawable paths in millimetres. */
+export function preparePaths(inPaths: Path[], planOptions: PlanOptions): Vec2[][] {
   let paths: Vec2[][] = inPaths.map((path) => path.points);
-  const device = Device(planOptions.hardware);
 
   // Rotate drawing around center of paper to handle plotting portrait drawings
   // along y-axis of plotter
@@ -43,9 +38,6 @@ export function replan(inPaths: Path[], planOptions: PlanOptions): Plan {
     paths = scaleToPaper(paths, planOptions.paperSize, planOptions.marginMm);
   } else {
     paths = paths.map((ps) => ps.map((p) => vmul(p, mmPerSvgUnit)));
-    if (planOptions.cropToMargins) {
-      paths = cropToMargins(paths, planOptions.paperSize, planOptions.marginMm);
-    }
   }
 
   // Rescaling loses the stroke info, so refer back to the original paths to
@@ -55,6 +47,11 @@ export function replan(inPaths: Path[], planOptions: PlanOptions): Plan {
     paths = paths.filter((_path, i) => planOptions.selectedGroupLayers.has(inPaths[i].groupId));
   } else if (planOptions.layerMode === "stroke") {
     paths = paths.filter((_path, i) => planOptions.selectedStrokeLayers.has(inPaths[i].stroke));
+  }
+
+  // Cropping can split or remove paths, so select layers while indices still match.
+  if (!planOptions.fitPage && planOptions.cropToMargins) {
+    paths = cropToMargins(paths, planOptions.paperSize, planOptions.marginMm);
   }
 
   if (planOptions.pointJoinRadius > 0) {
@@ -79,8 +76,41 @@ export function replan(inPaths: Path[], planOptions: PlanOptions): Plan {
     console.timeEnd("joining nearby paths");
   }
 
+  return paths;
+}
+
+/** The greedy incumbent, also retained as the research comparison baseline. */
+export function replanGreedy(inPaths: Path[], planOptions: PlanOptions): Plan {
+  return planPreparedPaths(preparePaths(inPaths, planOptions), planOptions);
+}
+
+/** Create a motion plan using the selected drawing and device settings. */
+export async function replan(inPaths: Path[], planOptions: PlanOptions): Promise<Plan> {
+  const deadline = performance.now() + 5000;
+  const paths = preparePaths(inPaths, planOptions);
+  const baseline = planPreparedPaths(paths, planOptions);
+  if (!planOptions.sortPaths) return baseline;
+  const started = performance.now();
+  try {
+    const routed = await optimizePaths(paths, planOptions, deadline - 300);
+    if (routed === paths) return baseline;
+    const candidate = planPreparedPaths(routed, planOptions);
+    // Require five net seconds after paying for this one-off optimization.
+    const requiredSavings = 5 + (performance.now() - started) / 1000;
+    return Number.isFinite(candidate.duration()) && baseline.duration() - candidate.duration() >= requiredSavings
+      ? candidate
+      : baseline;
+  } catch (error) {
+    console.warn("Route optimization unavailable; using the prepared drawing order.", error);
+    return baseline;
+  }
+}
+
+function planPreparedPaths(prepared: Vec2[][], planOptions: PlanOptions): Plan {
+  const device = Device(planOptions.hardware);
+
   // Convert the paths to units of "steps".
-  paths = paths.map((ps) => ps.map((p) => vmul(p, device.stepsPerMm)));
+  const paths = prepared.map((ps) => ps.map((p) => vmul(p, device.stepsPerMm)));
 
   // And finally, motion planning.
   console.time("planning pen motions");
