@@ -51,7 +51,7 @@ function modf(d: number): [number, number] {
   return [fracPart, intPart];
 }
 
-export type Hardware = "v3" | "brushless" | "nextdraw-2234";
+export type Hardware = "v3" | "brushless" | "nextdraw-2234" | "idraw-h-se";
 const PENDING = Symbol("PENDING");
 
 /**
@@ -70,13 +70,16 @@ interface PendingCommand {
   handle: (line: string) => unknown | typeof PENDING;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
-  cancelled: boolean;
 }
 
 export class EBB {
   public port: EBBPort;
   private commandQueue: PendingCommand[];
   private writer: WritableStreamDefaultWriter<Uint8Array>;
+  private readerAbort = new AbortController();
+  private reading: Promise<void>;
+  private transportError: Error | null = null;
+  private motionDeadline = 0;
   public hardware: Hardware;
 
   private microsteppingMode = MicrostepMode.DISABLED;
@@ -96,13 +99,13 @@ export class EBB {
     this.commandQueue = [];
 
     let buffer = "";
+    const decoder = new TextDecoder();
 
-    port.readable
-      .pipeThrough(new TextDecoderStream() as TransformStream<Uint8Array, string>)
+    this.reading = port.readable
       .pipeTo(
         new WritableStream({
           write: (chunk) => {
-            buffer += chunk;
+            buffer += decoder.decode(chunk, { stream: true });
             const parts = buffer.split(/[\r\n]+/); // each command is on a different line
             buffer = parts.pop() || "";
 
@@ -114,10 +117,6 @@ export class EBB {
               const cmd = this.commandQueue[0];
               if (!cmd) {
                 console.log(`unexpected data: ${part}`);
-                continue;
-              }
-              if (cmd.cancelled) {
-                this.commandQueue.shift(); // silently drain an orphaned response
                 continue;
               }
               if (part[0] === "!") {
@@ -136,13 +135,12 @@ export class EBB {
             }
           },
         }),
+        { signal: this.readerAbort.signal },
       )
-      .catch((error: unknown) => {
-        // Swallow premature close error; the disconnect handler takes care of it
-        if ((error as NodeJS.ErrnoException).code !== "ERR_STREAM_PREMATURE_CLOSE") {
-          throw error;
-        }
-      });
+      .then(
+        () => this.failTransport(new Error("Serial port closed")),
+        (error: unknown) => this.failTransport(error),
+      );
   }
 
   public static async create(port: EBBPort, hardware: Hardware = "brushless"): Promise<EBB> {
@@ -168,7 +166,11 @@ export class EBB {
   }
 
   public async close(): Promise<void> {
-    return await this.port.close();
+    this.failTransport(new Error("Serial port closed"));
+    this.readerAbort.abort();
+    await this.reading;
+    this.writer.releaseLock();
+    await this.port.close();
   }
 
   public changeHardware(hardware: Hardware) {
@@ -255,12 +257,9 @@ export class EBB {
     }
   }
 
-  /** Cancel all pending commands. Commands already sent to the board are
-   *  marked and left as sentinels so their in-flight responses are received
-   *  by the reader (which will discard them) */
+  /** Reject pending commands, retaining their response handlers to consume complete in-flight replies. */
   public cancel(): void {
     for (const cmd of this.commandQueue) {
-      cmd.cancelled = true;
       cmd.reject(new Error("Cancelled"));
     }
   }
@@ -467,6 +466,8 @@ export class EBB {
   }
 
   public executeMotion(m: Motion): Promise<void> {
+    // A response can wait behind motions already buffered on the controller.
+    this.motionDeadline = Math.max(Date.now(), this.motionDeadline) + m.duration() * 1000;
     if (m instanceof XYMotion) {
       return this.executeXYMotion(m);
     }
@@ -476,16 +477,78 @@ export class EBB {
     throw new Error(`Unknown motion type: ${m.constructor.name}`);
   }
 
-  public async executePlan(plan: Plan, microsteppingMode: RunningMicrostepMode = MicrostepMode.EIGHTH): Promise<void> {
-    await this.configureFifoDepth();
-    await this.enableMotors(microsteppingMode);
-
-    for (const m of plan.motions) {
-      await this.executeMotion(m);
+  public async executePlan(
+    plan: Plan,
+    microsteppingMode: RunningMicrostepMode = MicrostepMode.EIGHTH,
+    controls: {
+      signal?: AbortSignal;
+      onprogress?: (index: number) => void;
+      waitWhilePaused?: () => Promise<void> | null;
+    } = {},
+  ): Promise<"finished" | "cancelled"> {
+    const { signal } = controls;
+    if (signal?.aborted) return "cancelled";
+    const firstPenMotion = plan.motions.find((m) => m instanceof PenMotion);
+    if (!firstPenMotion) {
+      if (plan.duration() !== 0) throw new Error("A drawing must include pen motions");
+      return "finished";
     }
-
-    await this.waitUntilMotorsIdle();
-    await this.disableMotors();
+    let resolveAbort: () => void = () => {};
+    const aborted = new Promise<void>((resolve) => {
+      resolveAbort = resolve;
+    });
+    const abort = () => {
+      this.cancel();
+      resolveAbort();
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    let started = false;
+    let failure: unknown;
+    let result: "finished" | "cancelled" = "finished";
+    let penIsUp = true;
+    try {
+      await this.configureFifoDepth();
+      signal?.throwIfAborted();
+      started = true;
+      await this.enableMotors(microsteppingMode);
+      signal?.throwIfAborted();
+      await this.setPenHeight(firstPenMotion.initialPos, 1000, 1000);
+      signal?.throwIfAborted();
+      for (const [index, motion] of plan.motions.entries()) {
+        controls.onprogress?.(index);
+        signal?.throwIfAborted();
+        await this.executeMotion(motion);
+        signal?.throwIfAborted();
+        if (motion instanceof PenMotion) penIsUp = motion.finalPos === firstPenMotion.initialPos;
+        if (penIsUp) await Promise.race([controls.waitWhilePaused?.(), aborted]);
+        signal?.throwIfAborted();
+      }
+      await this.waitUntilMotorsIdle();
+      signal?.throwIfAborted();
+    } catch (error) {
+      if (signal?.aborted) result = "cancelled";
+      else failure = error;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      if (started) {
+        try {
+          if (failure || result === "cancelled") {
+            await this.setPenHeight(firstPenMotion.initialPos, 1000);
+            if (result === "cancelled") await this.command("HM,4000");
+            await this.waitUntilMotorsIdle();
+          }
+        } catch (error) {
+          failure ??= error;
+        }
+        try {
+          await this.disableMotors();
+        } catch (error) {
+          failure ??= error;
+        }
+      }
+    }
+    if (failure) throw failure;
+    return result;
   }
 
   /**
@@ -562,15 +625,29 @@ export class EBB {
   }
 
   private run<T>(cmd: string, handle: (line: string) => T | typeof PENDING): Promise<T> {
+    if (this.transportError) return Promise.reject(this.transportError);
     return new Promise((resolve, reject) => {
+      const timeout = setTimeout(
+        () => this.failTransport(new Error(`Timed out waiting for ${cmd.split(",")[0]}`)),
+        Math.min(2147483647, Math.max(30000, this.motionDeadline - Date.now() + 30000)),
+      );
       this.commandQueue.push({
         handle,
-        resolve: (value) => resolve(value as T),
-        reject,
-        cancelled: false,
+        resolve: (value) => {
+          clearTimeout(timeout);
+          resolve(value as T);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
       });
-
-      void this.write(cmd);
+      void this.write(cmd).catch((error: unknown) => this.failTransport(error));
     });
+  }
+
+  private failTransport(error: unknown): void {
+    this.transportError ??= error instanceof Error ? error : new Error(String(error));
+    for (const command of this.commandQueue.splice(0)) command.reject(this.transportError);
   }
 }

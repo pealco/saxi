@@ -6,6 +6,7 @@
  */
 
 import http from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,9 +17,9 @@ import type { Request, Response } from "express";
 import express from "express";
 import type WebSocket from "ws";
 import { WebSocketServer } from "ws";
-import { createMockSerialPort } from "./__tests__/mocks/serialport.js";
-import { EBB, type EBBPort, type Hardware } from "./ebb.js";
-import { type Motion, PenMotion, Plan } from "./planning.js";
+import { EBB, type Hardware } from "./ebb.js";
+import { Device, PenMotion, Plan } from "./planning.js";
+import { createSimulatedSerialPort } from "./simulated-serial.js";
 import { SerialPortSerialPort } from "./serialport-serialport.js";
 import * as _self from "./server.js"; // use self-import for test mocking
 import { formatDuration } from "./util.js";
@@ -54,15 +55,44 @@ export async function startServer(
   maxPayloadSize = "200mb",
 ) {
   const app = express();
+  const password = process.env.SAXI_TOKEN;
+  if (enableCors && !password) throw new Error("Cross-origin access requires SAXI_TOKEN");
+  const credentials = password ? Buffer.from(`Basic ${Buffer.from(`saxi:${password}`).toString("base64")}`) : null;
+  function authorize(req: http.IncomingMessage): number {
+    const host = req.headers.host;
+    if (!host) return 403;
+    if (!password && !/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(host)) return 403;
+    const origin = req.headers.origin;
+    if (origin && !(enableCors && password)) {
+      if (origin !== `http://${host}`) return 403;
+    }
+    if (credentials) {
+      const supplied = Buffer.from(req.headers.authorization ?? "");
+      if (supplied.length !== credentials.length || !timingSafeEqual(supplied, credentials)) return 401;
+    }
+    return 200;
+  }
+  if (enableCors) app.use(cors());
+  app.use((req, res, next) => {
+    const status = authorize(req);
+    if (status === 200) return next();
+    if (status === 401) res.setHeader("WWW-Authenticate", 'Basic realm="saxi", charset="UTF-8"');
+    res.status(status).send(status === 401 ? "Authentication required" : "Origin or host not allowed");
+  });
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   app.use("/", express.static(path.join(__dirname, "..", "ui")));
   app.use(express.json({ limit: maxPayloadSize }));
-  if (enableCors) {
-    app.use(cors());
-  }
   // Web and Socket server
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server });
+  const wss = new WebSocketServer({ noServer: true });
+  server.on("upgrade", (req, socket, head) => {
+    const status = authorize(req);
+    if (status !== 200) {
+      socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\n\r\n`);
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+  });
 
   let ebb: EBB | null = null;
   let currentHardware: Hardware = hardware;
@@ -76,27 +106,48 @@ export async function startServer(
 
   wss.on("connection", (ws) => {
     clients.push(ws);
+    ws.on("error", (error) => console.warn("WebSocket error", error.message));
     ws.on("message", async (message) => {
-      const msg = JSON.parse(message.toString());
-      switch (msg.c) {
-        case "ping":
-          ws.send(JSON.stringify({ c: "pong" }));
-          break;
-        case "limp":
-          await ebb?.disableMotors();
-          break;
-        case "setPenHeight":
-          if (!ebb) break;
-          if (ebb.supportsSR()) {
-            await ebb.setServoPowerTimeout(10000, true);
-          }
-          await ebb.setPenHeight(msg.p.height, msg.p.rate);
-          break;
-        case "changeHardware":
-          currentHardware = msg.p.hardware;
-          ebb?.changeHardware(currentHardware);
-          broadcast({ c: "dev", p: getDeviceInfo(ebb, com, currentHardware) });
-          break;
+      try {
+        const msg = JSON.parse(message.toString());
+        if (!msg || typeof msg !== "object" || typeof msg.c !== "string") throw new Error("Invalid control message");
+        if (plotting && msg.c !== "ping") throw new Error("Manual controls are unavailable during a plot");
+        switch (msg.c) {
+          case "ping":
+            ws.send(JSON.stringify({ c: "pong" }));
+            break;
+          case "limp":
+            await ebb?.disableMotors();
+            break;
+          case "setPenHeight":
+            if (
+              !msg.p ||
+              !Number.isFinite(msg.p.height) ||
+              !Number.isFinite(msg.p.rate) ||
+              msg.p.height < Device(currentHardware).penServoMin ||
+              msg.p.height > Device(currentHardware).penServoMax ||
+              msg.p.rate <= 0 ||
+              msg.p.rate > 65535
+            )
+              throw new Error("Invalid pen height or rate");
+            if (!ebb) break;
+            if (ebb.supportsSR()) {
+              await ebb.setServoPowerTimeout(10000, true);
+            }
+            await ebb.setPenHeight(msg.p.height, msg.p.rate);
+            break;
+          case "changeHardware":
+            if (!["v3", "brushless", "nextdraw-2234", "idraw-h-se"].includes(msg.p?.hardware))
+              throw new Error("Invalid hardware");
+            currentHardware = msg.p.hardware;
+            ebb?.changeHardware(currentHardware);
+            broadcast({ c: "dev", p: getDeviceInfo(ebb, com, currentHardware) });
+            break;
+          default:
+            throw new Error("Unknown control command");
+        }
+      } catch (error) {
+        ws.send(JSON.stringify({ c: "error", p: { message: error instanceof Error ? error.message : String(error) } }));
       }
     });
 
@@ -108,7 +159,7 @@ export async function startServer(
       ws.send(JSON.stringify({ c: "progress", p: { motionIdx } }));
     }
     if (currentPlan !== null) {
-      ws.send(JSON.stringify({ c: "plan", p: { motions: currentPlan.toTransferable() } }));
+      ws.send(JSON.stringify({ c: "plan", p: { motions: currentPlan.serialize() } }));
     }
 
     ws.on("close", () => {
@@ -125,11 +176,29 @@ export async function startServer(
       res.status(400).send("Plot in progress");
       return;
     }
+    let plan: Plan;
+    try {
+      plan = Plan.deserialize(req.body);
+      const device = Device(currentHardware);
+      for (const motion of plan.motions) {
+        if (
+          motion instanceof PenMotion &&
+          [motion.initialPos, motion.finalPos].some(
+            (position) => position < device.penServoMin || position > device.penServoMax,
+          )
+        )
+          throw new Error("Pen position outside the selected hardware's range");
+      }
+    } catch (error) {
+      res.status(400).send(error instanceof Error ? error.message : String(error));
+      return;
+    }
     plotting = true;
+    unpaused = signalUnpause = null;
     controller = new AbortController();
     const { signal } = controller;
+    let outcome = "finished";
     try {
-      const plan = Plan.deserialize(req.body);
       currentPlan = plan;
       console.log(`Received plan of estimated duration ${formatDuration(plan.duration())}`);
       console.log(ebb !== null ? "Beginning plot..." : "Simulating plot...");
@@ -151,8 +220,20 @@ export async function startServer(
         console.log("Wake lock not available on this platform. Ensure your machine does not sleep during plotting");
       }
       try {
-        const plotEbb = ebb ?? (await EBB.create(createMockSerialPort() as unknown as EBBPort, currentHardware));
-        await doPlot(createPlotter(plotEbb), plan, signal);
+        const simulated = ebb === null;
+        const plotEbb = ebb ?? (await EBB.create(createSimulatedSerialPort(), currentHardware));
+        try {
+          outcome = await plotEbb.executePlan(plan, 1, {
+            signal,
+            onprogress(index) {
+              motionIdx = index;
+              broadcast({ c: "progress", p: { motionIdx } });
+            },
+            waitWhilePaused: () => unpaused,
+          });
+        } finally {
+          if (simulated) await plotEbb.close();
+        }
         const end = Date.now();
         console.log(`Plot took ${formatDuration((end - begin) / 1000)}`);
       } finally {
@@ -160,9 +241,22 @@ export async function startServer(
           wakeLock.release();
         }
       }
+    } catch (error) {
+      outcome = "error";
+      console.error("Plot failed", error);
     } finally {
       plotting = false;
       controller = null;
+      motionIdx = null;
+      currentPlan = null;
+      resume();
+      broadcast({
+        c: outcome,
+        p: {
+          message: outcome === "error" ? "Plot failed. Check the device connection and server log." : undefined,
+          plotFailed: outcome === "error",
+        },
+      });
     }
   });
 
@@ -173,19 +267,13 @@ export async function startServer(
   app.post("/cancel", (_req: Request, res: Response) => {
     if (controller) {
       controller.abort();
-      controller = null;
     }
-    ebb?.cancel();
-    if (unpaused) {
-      signalUnpause?.();
-      broadcast({ c: "pause", p: { paused: false } });
-    }
-    unpaused = signalUnpause = null;
+    resume();
     res.status(200).end();
   });
 
   app.post("/pause", (_req: Request, res: Response) => {
-    if (!unpaused) {
+    if (plotting && !unpaused) {
       unpaused = new Promise((resolve) => {
         signalUnpause = resolve;
       });
@@ -195,12 +283,15 @@ export async function startServer(
   });
 
   app.post("/resume", (_req: Request, res: Response) => {
-    if (signalUnpause) {
-      signalUnpause();
-      signalUnpause = unpaused = null;
-    }
+    resume();
     res.status(200).end();
   });
+
+  function resume() {
+    signalUnpause?.();
+    signalUnpause = unpaused = null;
+    broadcast({ c: "pause", p: { paused: false } });
+  }
 
   function broadcast(msg: Record<string, unknown>) {
     for (const client of clients) {
@@ -212,87 +303,9 @@ export async function startServer(
     }
   }
 
-  interface Plotter {
-    prePlot: (initialPenHeight: number) => Promise<void>;
-    executeMotion: (m: Motion, progress: [number, number]) => Promise<void>;
-    postCancel: (initialPenHeight: number) => Promise<void>;
-    postPlot: () => Promise<void>;
-  }
-
-  function createPlotter(ebb: EBB): Plotter {
-    return {
-      async prePlot(initialPenHeight: number): Promise<void> {
-        await ebb.configureFifoDepth();
-        await ebb.enableMotors(1); // 16x microstepping, matches defaults from Axidraw
-        await ebb.setPenHeight(initialPenHeight, 1000, 1000);
-      },
-      async executeMotion(motion: Motion, _progress: [number, number]): Promise<void> {
-        await ebb.executeMotion(motion);
-      },
-      async postCancel(initialPenHeight: number): Promise<void> {
-        await ebb.setPenHeight(initialPenHeight, 1000);
-        await ebb.command("HM,4000"); // HM returns carriage home without 3rd and 4th arguments
-        await ebb.waitUntilMotorsIdle();
-      },
-      async postPlot(): Promise<void> {
-        await ebb.waitUntilMotorsIdle();
-        await ebb.disableMotors();
-      },
-    };
-  }
-
-  async function doPlot(plotter: Plotter, plan: Plan, signal: AbortSignal): Promise<void> {
-    const abortPromise = onceAbort(signal); // reuse abort promise
-    unpaused = null;
-    signalUnpause = null;
-    motionIdx = 0;
-
-    const firstPenMotion = plan.motions.find((x) => x instanceof PenMotion) as PenMotion;
-    await plotter.prePlot(firstPenMotion.initialPos);
-
-    let penIsUp = true;
-    try {
-      for (const motion of plan.motions) {
-        broadcast({ c: "progress", p: { motionIdx } });
-
-        await Promise.race([plotter.executeMotion(motion, [motionIdx, plan.motions.length]), abortPromise]);
-
-        if (motion instanceof PenMotion) {
-          penIsUp = motion.initialPos < motion.finalPos;
-        }
-
-        if (unpaused && penIsUp) {
-          await Promise.race([unpaused, abortPromise]);
-          broadcast({ c: "pause", p: { paused: false } });
-        }
-
-        motionIdx += 1;
-      }
-
-      broadcast({ c: "finished" });
-    } catch (err) {
-      if (signal.aborted) {
-        await plotter.postCancel(firstPenMotion.initialPos);
-        broadcast({ c: "cancelled" });
-        return;
-      }
-      throw err; // propagate real errors
-    } finally {
-      motionIdx = null;
-      currentPlan = null;
-      await plotter.postPlot();
-    }
-  }
-
-  function onceAbort(signal: AbortSignal): Promise<never> {
-    return new Promise((_resolve, reject) => {
-      signal.throwIfAborted();
-      signal.addEventListener("abort", () => reject(new Error("Aborted")), { once: true });
-    });
-  }
-
-  return new Promise<http.Server>((resolve) => {
-    server.listen(port, () => {
+  return new Promise<http.Server>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, password ? "0.0.0.0" : "127.0.0.1", () => {
       async function connect() {
         const devices = ebbs(com, currentHardware);
         for await (const device of devices) {
@@ -301,7 +314,7 @@ export async function startServer(
           broadcast({ c: "dev", p: getDeviceInfo(ebb, com, currentHardware) });
         }
       }
-      connect();
+      void connect().catch((error: unknown) => console.error("Device connection failed", error));
       const { family, address, port } = server.address() as AddressInfo;
       const addr = `${family === "IPv6" ? `[${address}]` : address}:${port}`;
       console.log(`Server listening on http://${addr}`);

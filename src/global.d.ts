@@ -3,6 +3,7 @@ declare module "wake-lock";
 declare module "color-interpolate";
 declare module "colormap";
 declare module "*.svg";
+declare module "*.css";
 
 // https://github.com/nornagon/flatten-svg/issues/27
 // since we have to define the types anyways, we can rename them

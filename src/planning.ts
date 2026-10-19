@@ -1,6 +1,7 @@
 // Cribbed from https://github.com/fogleman/axi/blob/master/axi/planner.py
 import type { Hardware } from "./ebb.js";
 import { PaperSize } from "./paper-size.js";
+import { dedupPoints } from "./util.js";
 import { type Vec2, vadd, vdot, vlen, vmul, vnorm, vsub } from "./vec.js";
 
 const epsilon = 1e-9;
@@ -67,6 +68,36 @@ export const defaultPlanOptions: PlanOptions = {
   hardware: "brushless",
   penHome: { x: 0, y: 0 },
 };
+
+export function validatePlanOptions(options: PlanOptions): void {
+  for (const key of ["penDownAcceleration", "penDownMaxVelocity", "penUpAcceleration", "penUpMaxVelocity"] as const) {
+    if (!Number.isFinite(options[key]) || options[key] <= 0) throw new Error(`${key} must be positive`);
+  }
+  for (const key of [
+    "marginMm",
+    "pointJoinRadius",
+    "pathJoinRadius",
+    "minimumPathLength",
+    "penDownCorneringFactor",
+    "penDropDuration",
+    "penLiftDuration",
+  ] as const) {
+    if (!Number.isFinite(options[key]) || options[key] < 0) throw new Error(`${key} must be nonnegative`);
+  }
+  for (const key of ["penUpHeight", "penDownHeight"] as const) {
+    if (!Number.isFinite(options[key]) || options[key] < 0 || options[key] > 100)
+      throw new Error(`${key} must be between 0 and 100`);
+  }
+  if (
+    ![options.paperSize.size.x, options.paperSize.size.y].every(
+      (size) => Number.isFinite(size) && size > 2 * options.marginMm,
+    )
+  ) {
+    throw new Error("Paper dimensions must be positive and larger than twice the margin");
+  }
+  if (![options.penHome.x, options.penHome.y, options.rotateDrawing].every(Number.isFinite))
+    throw new Error("Invalid home or rotation");
+}
 
 /**
  * An abstraction of all motion variables at a single point in time
@@ -355,6 +386,38 @@ function packBlock(
  * blocks stored as flat columns (see the STRIDE layout above).
  */
 export class XYMotion implements Motion {
+  public static deserialize(data: Extract<SerializedMotion, { type: "xy" }>): XYMotion {
+    const { length, cols, ts, ss } = data;
+    if (
+      !Number.isSafeInteger(length) ||
+      length < 1 ||
+      !Array.isArray(cols) ||
+      cols.length !== length * STRIDE ||
+      !Array.isArray(ts) ||
+      ts.length !== length ||
+      !Array.isArray(ss) ||
+      ss.length !== length ||
+      !cols.every(Number.isFinite) ||
+      !ts.every(Number.isFinite) ||
+      !ss.every(Number.isFinite)
+    ) {
+      throw new Error("Invalid XY motion arrays");
+    }
+    const packed = new Float64Array(cols.length);
+    for (let i = 0; i < length; i++) {
+      const b = i * STRIDE;
+      if (cols[b + DURATION] < 0 || cols[b + DIST] < 0 || ts[i] < 0 || ss[i] < 0)
+        throw new Error("Negative motion duration or distance");
+      packBlock(packed, i, cols[b], cols[b + 1], cols[b + 2], cols[b + 3], cols[b + 4], cols[b + 5], cols[b + 6]);
+      const finalVelocity = cols[b + V_INITIAL] + cols[b + ACCEL] * cols[b + DURATION];
+      if (!Number.isFinite(finalVelocity) || !Number.isFinite(packed[b + DIST]))
+        throw new Error("Motion exceeds numeric limits");
+      if (packed[b + DIST] > 0 && (cols[b + DURATION] === 0 || cols[b + V_INITIAL] + finalVelocity <= 0))
+        throw new Error("Movement requires positive duration and speed");
+    }
+    return new XYMotion(packed, length);
+  }
+
   /** Build from the short-lived Block objects the planner produces. */
   public static fromBlocks(blocks: Block[]): XYMotion {
     const cols = new Float64Array(blocks.length * STRIDE);
@@ -519,14 +582,29 @@ export class Plan {
     });
   }
 
-  public static deserialize(data: SerializedMotion[]): Plan {
-    return new Plan(
-      data.map((m) =>
-        m.type === "xy"
-          ? XYMotion.fromBuffers(new Float64Array(m.cols), new Float64Array(m.ts), new Float64Array(m.ss), m.length)
-          : new PenMotion(m.initialPos, m.finalPos, m.duration),
-      ),
-    );
+  public static deserialize(data: unknown): Plan {
+    if (!Array.isArray(data)) throw new Error("Expected an array of motions");
+    const motions = data.map((m) => {
+      if (!m || typeof m !== "object") throw new Error("Invalid motion");
+      if (m.type === "xy") return XYMotion.deserialize(m);
+      if (
+        m.type !== "pen" ||
+        ![m.initialPos, m.finalPos, m.duration].every(Number.isFinite) ||
+        m.duration < 0 ||
+        m.initialPos < 0 ||
+        m.initialPos > 65535 ||
+        m.finalPos < 0 ||
+        m.finalPos > 65535
+      ) {
+        throw new Error("Invalid pen motion");
+      }
+      return new PenMotion(m.initialPos, m.finalPos, m.duration);
+    });
+    const result = new Plan(motions);
+    if (!Number.isFinite(result.duration())) throw new Error("Invalid total duration");
+    if (!motions.some((m) => m instanceof PenMotion) && result.duration() !== 0)
+      throw new Error("A drawing must include pen motions");
+    return result;
   }
 
   public toTransferable(): TransferredMotion[] {
@@ -744,20 +822,6 @@ function computeTrapezoid(
   const p2 = vadd(p1, vmul(dir, s1));
   const p3 = vadd(p1, vmul(dir, distance - s3));
   return { s1, s2, s3, t1, t2, t3, p1, p2, p3, p4 };
-}
-
-function dedupPoints(points: Vec2[], epsilon: number): Vec2[] {
-  if (epsilon === 0) {
-    return points;
-  }
-  const dedupedPoints: Vec2[] = [];
-  dedupedPoints.push(points[0]);
-  for (const p of points.slice(1)) {
-    if (vlen(vsub(p, dedupedPoints[dedupedPoints.length - 1])) > epsilon) {
-      dedupedPoints.push(p);
-    }
-  }
-  return dedupedPoints;
 }
 
 /**

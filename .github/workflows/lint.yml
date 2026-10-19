@@ -37,7 +37,10 @@ jobs:
             node_modules
             dist/.tsbuildinfo
           key: ${{ runner.os }}-node-${{ matrix.node-version }}-${{ hashFiles('package-lock.json') }}
-      - run: npm install --prefer-offline --no-audit  --no-fund --ignore-scripts
+      - run: npm ci --prefer-offline --no-audit --no-fund --ignore-scripts
+      - run: npm run build
       - run: npm test
+      - run: npm prune --omit=dev --ignore-scripts --no-audit --no-fund
+      - run: npm run test:package
 permissions:
   contents: read

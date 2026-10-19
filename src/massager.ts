@@ -1,6 +1,6 @@
 import type { Path } from "flatten-svg";
 import { elideShorterThan, merge as joinNearbyPaths, reorder as sortPaths } from "optimize-paths";
-import { Device, type Plan, type PlanOptions, plan } from "./planning.js";
+import { Device, type Plan, type PlanOptions, plan, validatePlanOptions } from "./planning.js";
 import { optimizePaths } from "./routing.js";
 import { cropToMargins, dedupPoints, scaleToPaper } from "./util.js";
 import { type Vec2, vmul, vrot } from "./vec.js";
@@ -13,6 +13,7 @@ const mmPerSvgUnit = mmPerInch / svgUnitsPerInch;
 
 /** Apply the drawing settings and return the drawable paths in millimetres. */
 export function preparePaths(inPaths: Path[], planOptions: PlanOptions): Vec2[][] {
+  validatePlanOptions(planOptions);
   let paths: Vec2[][] = inPaths.map((path) => path.points);
 
   // Rotate drawing around center of paper to handle plotting portrait drawings

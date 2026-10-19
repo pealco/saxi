@@ -25,7 +25,9 @@ function getSize(el: HTMLElement | null): ComponentSize {
   };
 }
 
-export default function useComponentSize<T extends HTMLElement = HTMLElement>(ref: React.RefObject<T>): ComponentSize {
+export default function useComponentSize<T extends HTMLElement = HTMLElement>(
+  ref: React.RefObject<T | null>,
+): ComponentSize {
   const [componentSize, setComponentSize] = useState<ComponentSize>(getSize(ref ? ref.current : null));
 
   const handleResize = useCallback(

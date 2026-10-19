@@ -63,7 +63,7 @@ Start the `saxi` server from the terminal:
 
 ```bash
 $ saxi
-Server listening on http://0.0.0.0:9080
+Server listening on http://127.0.0.1:9080
 Connecting to EBB on /dev/tty.usbmodem1461
 ```
 
@@ -71,8 +71,18 @@ Then open a web browser:
 
 Go to `http://localhost:9080` if you're using the same computer where saxi is running.
 
-Go to `http://<computer-ip>:9080` if you're on a different device.
-(You can find the IP address by running `hostname -I` on the computer running saxi.)
+The server accepts local connections only by default. To connect from a different
+device, set `SAXI_TOKEN` to a password before starting saxi. This enables network
+access and requires HTTP Basic authentication for the UI, API, and WebSocket:
+
+```sh
+SAXI_TOKEN='your-password' saxi
+```
+
+Open `http://<computer-ip>:9080` and sign in with username `saxi` and that password.
+HTTP does not encrypt the password; use this only on a trusted network, or use an
+SSH tunnel to the default local server. For example, `ssh -L 9080:localhost:9080 pi@<computer-ip>`
+lets you open `http://localhost:9080` securely without enabling network access.
 
 ---
 
@@ -180,7 +190,9 @@ itself, you'll need to enable
 [CORS](https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS), otherwise
 GET/POST requests will be denied by the browser. CORS is disabled by default as
 a security precaution, but if you need it it's available. Just launch saxi with
-the `--enable-cors` flag.
+the `--enable-cors` flag with `SAXI_TOKEN` set. Cross-origin API clients must send
+the same Basic authentication credentials; requests from other origins are
+rejected unless this flag is enabled.
 
 ### Info
 

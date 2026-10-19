@@ -1,27 +1,9 @@
 /** biome-ignore-all lint/suspicious/noEqualsToNull: better than !== null & !== undefined */
 import { EventEmitter } from "node:events";
+import { Readable } from "node:stream";
 import type { OpenOptions } from "@serialport/bindings-interface";
 import { SerialPort as NodeSerialPort } from "serialport";
 
-function readableStreamFromAsyncIterable<T>(iterable: AsyncIterable<T>) {
-  const it = iterable[Symbol.asyncIterator]();
-  return new ReadableStream(
-    {
-      async pull(controller) {
-        const { done, value } = await it.next();
-        if (done) {
-          controller.close();
-        } else {
-          controller.enqueue(value);
-        }
-      },
-      async cancel() {
-        await it.return?.();
-      },
-    },
-    { highWaterMark: 0 },
-  );
-}
 interface SerialPortOpenOptions extends Omit<OpenOptions, "parity"> {
   parity?: ParityType;
 }
@@ -64,7 +46,7 @@ export class SerialPortSerialPort extends EventEmitter implements SerialPort {
         this.connected = true;
         resolve();
       });
-      this.readable = readableStreamFromAsyncIterable(this._port);
+      this.readable = Readable.toWeb(this._port) as ReadableStream<Uint8Array>;
       this.writable = new WritableStream({
         write: (chunk) => {
           return new Promise((resolve, reject) => {

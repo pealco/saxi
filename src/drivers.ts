@@ -1,5 +1,5 @@
 import { EBB, type EBBPort, type Hardware } from "./ebb.js";
-import { Device, PenMotion, Plan } from "./planning.js";
+import { Plan } from "./planning.js";
 
 export interface DeviceInfo {
   path: string;
@@ -13,6 +13,7 @@ export abstract class BaseDriver {
   public onprogress: (motionIdx: number) => void = () => {};
   public oncancelled: () => void = () => {};
   public onfinished: () => void = () => {};
+  public onerror: (message: string, plotFailed?: boolean) => void = () => {};
   public ondevinfo: (devInfo: DeviceInfo) => void = () => {};
   public onpause: (paused: boolean) => void = () => {};
   public connected = false;
@@ -40,7 +41,7 @@ export abstract class BaseDriver {
 export class WebSerialDriver extends BaseDriver {
   private _unpaused: Promise<void> | null = null;
   private _signalUnpause: (() => void) | null = null;
-  private _cancelRequested = false;
+  private controller: AbortController | null = null;
   private _disconnectHandler: ((event: Event) => void) | null = null;
 
   public static async connect(port?: SerialPort, hardware: Hardware = "brushless") {
@@ -100,50 +101,36 @@ export class WebSerialDriver extends BaseDriver {
   }
 
   public async plot(plan: Plan): Promise<void> {
-    const microsteppingMode = 1; // 16x microstepping, matches defaults from Axidraw
+    if (this.controller) {
+      this.onerror("Plot in progress");
+      return;
+    }
+    this.controller = new AbortController();
     this._unpaused = null;
-    this._cancelRequested = false;
-    await this.ebb.enableMotors(microsteppingMode);
-
-    let motionIdx = 0;
-    let penIsUp = true;
-    for (const motion of plan.motions) {
-      this.onprogress(motionIdx);
-      await this.ebb.executeMotion(motion);
-      if (motion instanceof PenMotion) {
-        penIsUp = motion.initialPos < motion.finalPos;
-      }
-      if (this._unpaused && penIsUp) {
-        await this._unpaused;
-        this.onpause(false);
-      }
-      if (this._cancelRequested) { break; } // biome-ignore format: compactness
-      motionIdx += 1;
+    try {
+      const result = await this.ebb.executePlan(plan, 1, {
+        signal: this.controller.signal,
+        onprogress: (index) => this.onprogress(index),
+        waitWhilePaused: () => this._unpaused,
+      });
+      this.controller = null;
+      this.resume();
+      if (result === "cancelled") this.oncancelled();
+      else this.onfinished();
+    } catch (error) {
+      this.controller = null;
+      this.resume();
+      this.onerror(error instanceof Error ? error.message : String(error), true);
     }
-
-    if (this._cancelRequested) {
-      const device = Device(this.ebb.hardware);
-      if (!penIsUp) {
-        // Move to the pen up position, or 50% if no position was found
-        const penMotion = plan.motions.find((motion): motion is PenMotion => motion instanceof PenMotion);
-        const penUpPosition = penMotion ? Math.max(penMotion.initialPos, penMotion.finalPos) : device.penPctToPos(50);
-        await this.ebb.setPenHeight(penUpPosition, 1000);
-        await this.ebb.command("HM,4000"); // HM returns carriage home without 3rd and 4th arguments
-      }
-      this.oncancelled();
-    } else {
-      this.onfinished();
-    }
-
-    await this.ebb.waitUntilMotorsIdle();
-    await this.ebb.disableMotors();
   }
 
   public cancel(): void {
-    this._cancelRequested = true;
+    this.controller?.abort();
+    this.resume();
   }
 
   public pause(): void {
+    if (!this.controller || this._unpaused) return;
     this._unpaused = new Promise((resolve) => {
       this._signalUnpause = resolve;
     });
@@ -155,17 +142,20 @@ export class WebSerialDriver extends BaseDriver {
     this._unpaused = null;
     this._signalUnpause = null;
     signal?.();
+    this.onpause(false);
   }
 
   public async setPenHeight(height: number, rate: number): Promise<void> {
-    if (this.ebb.supportsSR()) {
-      await this.ebb.setServoPowerTimeout(10000, true);
+    try {
+      if (this.ebb.supportsSR()) await this.ebb.setServoPowerTimeout(10000, true);
+      await this.ebb.setPenHeight(height, rate);
+    } catch (error) {
+      this.onerror(error instanceof Error ? error.message : String(error));
     }
-    await this.ebb.setPenHeight(height, rate);
   }
 
   public limp(): void {
-    this.ebb.disableMotors();
+    void this.ebb.disableMotors().catch((error: unknown) => this.onerror(String(error)));
   }
 
   public changeHardware(hardware: Hardware): void {
@@ -213,6 +203,9 @@ export class SaxiDriver extends BaseDriver {
     this.socket.addEventListener("message", (e: MessageEvent) => {
       const msg = JSON.parse(e.data);
       switch (msg.c) {
+        case "error": {
+          this.onerror(msg.p.message, msg.p.plotFailed === true);
+        } break;
         case "pong": {
           // nothing
         } break;
@@ -232,7 +225,7 @@ export class SaxiDriver extends BaseDriver {
           this.onpause(msg.p.paused);
         } break;
         case "plan": {
-          this.onplan(Plan.fromTransferable(msg.p.motions));
+          this.onplan(Plan.deserialize(msg.p.motions));
         } break;
         default: {
           console.log("Unknown message from server:", msg);
@@ -251,26 +244,30 @@ export class SaxiDriver extends BaseDriver {
     });
   }
 
+  private async request(path: string, plan?: Plan): Promise<void> {
+    try {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: plan ? JSON.stringify(plan.serialize()) : undefined,
+      });
+      if (!response.ok) throw new Error(await response.text());
+    } catch (error) {
+      this.onerror(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   public plot(plan: Plan) {
-    // const motions = plan.toTransferable();
-    // this.send({ c: "plot", p: { motions } });
-    fetch("/plot", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(plan.serialize()),
-    });
+    return this.request("/plot", plan);
   }
-
   public cancel() {
-    fetch("/cancel", { method: "POST" });
+    void this.request("/cancel");
   }
-
   public pause() {
-    fetch("/pause", { method: "POST" });
+    void this.request("/pause");
   }
-
   public resume() {
-    fetch("/resume", { method: "POST" });
+    void this.request("/resume");
   }
 
   public send(msg: object) {

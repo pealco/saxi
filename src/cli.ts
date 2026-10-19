@@ -4,7 +4,7 @@
  */
 import { readFileSync } from "node:fs";
 import { flattenSVG } from "flatten-svg";
-import { Window } from "svgdom";
+import { createSVGWindow } from "svgdom";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import type { Hardware } from "./ebb.js";
@@ -14,10 +14,26 @@ import { Device, defaultPlanOptions, type PlanOptions } from "./planning.js";
 import { connectEBB, startServer } from "./server.js";
 import { formatDuration } from "./util.js";
 
-function parseSvg(svg: string) {
-  const window = new Window();
+export function parseSvg(svg: string) {
+  const window = createSVGWindow();
   window.document.documentElement.innerHTML = svg;
-  return window.document.documentElement;
+  const drawing = window.document.documentElement.querySelector("svg");
+  if (!drawing) throw new Error("Expected an SVG drawing");
+  return drawing;
+}
+
+export function parsePaperSize(value: string): PaperSize {
+  if (Object.hasOwn(PaperSize.standard, value)) return PaperSize.standard[value];
+  const match = /^(\d+(?:\.\d+)?|\.\d+)\s*x\s*(\d+(?:\.\d+)?|\.\d+)\s*(cm|mm|in)$/i.exec(value.trim());
+  if (match) {
+    const scale = match[3].toLowerCase() === "in" ? 25.4 : match[3].toLowerCase() === "cm" ? 10 : 1;
+    const x = Number(match[1]) * scale;
+    const y = Number(match[2]) * scale;
+    if (Number.isFinite(x) && Number.isFinite(y) && x > 0 && y > 0) return new PaperSize({ x, y });
+  }
+  throw new Error(
+    `Paper size must be a standard name (${Object.keys(PaperSize.standard).join(", ")}) or positive dimensions such as 100x100mm or 16x10in`,
+  );
 }
 
 /**
@@ -29,7 +45,7 @@ export function cli(argv: string[]): void {
     .strict()
     .option("hardware", {
       describe: "select hardware type",
-      choices: ["v3", "brushless", "nextdraw-2234"] as const,
+      choices: ["v3", "brushless", "nextdraw-2234", "idraw-h-se"] as const,
       default: "brushless",
       coerce: (value) => value as Hardware,
     })
@@ -51,18 +67,7 @@ export function cli(argv: string[]): void {
           .option("paper-size", {
             alias: "s",
             describe: "Paper size to use",
-            coerce: (value) => {
-              if (Object.hasOwn(PaperSize.standard, value)) {
-                return PaperSize.standard[value];
-              }
-              const m = /^([0-9]*(?:\.[0-9]+)?)\s*x\s*([0-9]*(?:\.[0-9]+)?)\s*(cm|mm|in)$/i.exec(String(value).trim());
-              if (m) {
-                return new PaperSize({ x: Number(m[1]), y: Number(m[2]) });
-              }
-              throw new Error(
-                `Paper size should be a standard size (${Object.keys(PaperSize.standard).join(", ")}) or a custom size such as "100x100mm" or "16x10in"`,
-              );
-            },
+            coerce: parsePaperSize,
             demandOption: true,
           })
           .option("landscape", {
@@ -218,9 +223,12 @@ export function cli(argv: string[]): void {
         }
         console.log("plotting...");
         const startTime = Date.now();
-        await ebb.executePlan(p);
+        try {
+          await ebb.executePlan(p);
+        } finally {
+          await ebb.close();
+        }
         console.log(`done! took ${formatDuration((Date.now() - startTime) / 1000)}`);
-        await ebb.close();
       },
     )
     .command(
@@ -242,10 +250,13 @@ export function cli(argv: string[]): void {
           process.exit(1);
         }
         const device = Device(ebb.hardware);
-        await ebb.setPenHeight(device.penPctToPos(args.percent), 1000);
+        try {
+          await ebb.setPenHeight(device.penPctToPos(args.percent), 1000);
+        } finally {
+          await ebb.close();
+        }
 
         console.log(`moving to ${args.percent}%...`);
-        await ebb.close();
       },
     )
     .command(

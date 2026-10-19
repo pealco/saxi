@@ -116,6 +116,7 @@ function truncate(aabb: [Vec2, Vec2], seg: [Vec2, Vec2]): [Vec2, Vec2] | null {
  * input polyline that is completely within aabb.
  */
 function cropLineToAabb(pointList: Vec2[], aabb: [Vec2, Vec2]): Vec2[][] {
+  if (pointList.length === 1) return contains(aabb, pointList[0]) ? [pointList] : [];
   const truncatedPointLists: Vec2[][] = [];
   let currentPointList: Vec2[] | null = null;
   for (let i = 1; i < pointList.length; i++) {
@@ -156,7 +157,7 @@ export function cropToMargins(pointLists: Vec2[][], paperSize: PaperSize, margin
 }
 
 export function dedupPoints(points: Vec2[], epsilon: number): Vec2[] {
-  if (epsilon === 0) {
+  if (epsilon === 0 || points.length === 0) {
     return points;
   }
   const dedupedPoints = [points[0]];

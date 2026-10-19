@@ -6,6 +6,7 @@
     "moduleResolution": "nodenext",
     "esModuleInterop": true,
     "noImplicitAny": true,
+    "skipLibCheck": true,
     "jsx": "react",
     "paths": {
       "@serialport/bindings-interface": ["./node_modules/@serialport/bindings-interface/dist/index.d.ts"]

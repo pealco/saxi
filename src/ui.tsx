@@ -21,6 +21,7 @@ import type { PlannerResponse } from "./background-planner.js";
 import { PaperSize } from "./paper-size.js";
 import { Device, defaultPlanOptions, Plan, type PlanOptions, XYMotion } from "./planning.js";
 import useComponentSize from "./useComponentSize.js";
+import { sanitizeSvg } from "./svg.js";
 
 import { formatDuration } from "./util.js";
 
@@ -158,7 +159,13 @@ const usePlan = (paths: Path[] | null, planOptions: PlanOptions) => {
     if (!paths) {
       return () => {};
     }
-    if (lastPlan.current !== null && lastPaths.current === paths) {
+    if (
+      lastPlan.current !== null &&
+      lastPaths.current === paths &&
+      [planOptions.penUpHeight, planOptions.penDownHeight].every(
+        (height) => Number.isFinite(height) && height >= 0 && height <= 100,
+      )
+    ) {
       const rejiggered = attemptRejigger(lastPlanOptions.current ?? defaultPlanOptions, planOptions, lastPlan.current);
       if (rejiggered) {
         setPlan(rejiggered);
@@ -233,7 +240,7 @@ const setPaths = (paths: Path[]): Action => {
   };
 };
 
-function PenHeight({ state, driver }: { state: State; driver: BaseDriver }) {
+function PenHeight({ state, driver }: { state: State; driver: BaseDriver | null }) {
   const { penUpHeight, penDownHeight, hardware } = state.planOptions;
   const dispatch = useContext(DispatchContext);
   const setPenUpHeight = (x: number) => dispatch({ type: "SET_PLAN_OPTION", value: { penUpHeight: x } });
@@ -242,11 +249,11 @@ function PenHeight({ state, driver }: { state: State; driver: BaseDriver }) {
 
   const penUp = () => {
     const height = device.penPctToPos(penUpHeight);
-    driver.setPenHeight(height, 1000);
+    void driver?.setPenHeight(height, 1000);
   };
   const penDown = () => {
     const height = device.penPctToPos(penDownHeight);
-    driver.setPenHeight(height, 1000);
+    void driver?.setPenHeight(height, 1000);
   };
   return (
     <Fragment>
@@ -273,10 +280,10 @@ function PenHeight({ state, driver }: { state: State; driver: BaseDriver }) {
         </label>
       </div>
       <div className="flex">
-        <button type="button" onClick={penUp}>
+        <button type="button" onClick={penUp} disabled={!driver?.connected || state.progress !== null}>
           pen up
         </button>
-        <button type="button" onClick={penDown}>
+        <button type="button" onClick={penDown} disabled={!driver?.connected || state.progress !== null}>
           pen down
         </button>
       </div>
@@ -305,7 +312,7 @@ function HardwareOptions({ state, driver }: { state: State; driver: BaseDriver |
           value={currentHardware}
           onChange={(e) => handleHardwareChange(e.target.value as Hardware)}
           style={{ marginLeft: "8px" }}
-          disabled={!driver}
+          disabled={!driver?.connected || state.progress !== null}
         >
           <option value="v3">AxiDraw V3</option>
           <option value="brushless">AxiDraw V3 Brushless</option>
@@ -517,10 +524,10 @@ function PaperConfig({ state }: { state: State }) {
   );
 }
 
-function MotorControl({ driver }: { driver: BaseDriver }) {
+function MotorControl({ driver, plotting }: { driver: BaseDriver | null; plotting: boolean }) {
   return (
     <div>
-      <button type="button" onClick={() => driver.limp()}>
+      <button type="button" onClick={() => driver?.limp()} disabled={!driver?.connected || plotting}>
         disengage motors
       </button>
     </div>
@@ -772,19 +779,19 @@ function PlotButtons({
   state: State;
   plan: Plan | null;
   isPlanning: boolean;
-  driver: BaseDriver;
+  driver: BaseDriver | null;
 }) {
   function cancel() {
-    driver.cancel();
+    driver?.cancel();
   }
   function pause() {
-    driver.pause();
+    driver?.pause();
   }
   function resume() {
-    driver.resume();
+    driver?.resume();
   }
   function plot(plan: Plan) {
-    driver.plot(plan);
+    void driver?.plot(plan);
   }
 
   return (
@@ -797,7 +804,7 @@ function PlotButtons({
         <button
           type="button"
           className={`plot-button ${state.progress !== null ? "plot-button--plotting" : ""}`}
-          disabled={plan === null || state.progress !== null}
+          disabled={!driver?.connected || plan === null || state.progress !== null}
           onClick={() => plan && plot(plan)}
         >
           {plan && state.progress !== null ? "Plotting..." : "Plot"}
@@ -808,7 +815,7 @@ function PlotButtons({
           type="button"
           className={`cancel-button ${state.progress !== null ? "cancel-button--active" : ""}`}
           onClick={state.paused ? resume : pause}
-          disabled={plan === null || state.progress === null}
+          disabled={!driver?.connected || plan === null || state.progress === null}
         >
           {state.paused ? "Resume" : "Pause"}
         </button>
@@ -816,7 +823,7 @@ function PlotButtons({
           type="button"
           className={`cancel-button ${state.progress !== null ? "cancel-button--active" : ""}`}
           onClick={cancel}
-          disabled={plan === null || state.progress === null}
+          disabled={!driver?.connected || plan === null || state.progress === null}
         >
           Cancel
         </button>
@@ -1052,7 +1059,7 @@ function PortSelector({ driver, setDriver, hardware }: PortSelectorProps) {
             });
             setDriver(await WebSerialDriver.connect(port, hardware));
           } catch (e) {
-            alert(`Failed to connect to serial device: ${e.message}`);
+            alert(`Failed to connect to serial device: ${e instanceof Error ? e.message : String(e)}`);
             console.error(e);
           } finally {
             setInitializing(false);
@@ -1094,6 +1101,13 @@ function Root() {
     driver.oncancelled = driver.onfinished = () => {
       dispatch({ type: "SET_PROGRESS", motionIdx: null });
     };
+    driver.onerror = (message, plotFailed) => {
+      if (plotFailed) {
+        dispatch({ type: "SET_PROGRESS", motionIdx: null });
+        dispatch({ type: "SET_PAUSED", value: false });
+      }
+      alert(message);
+    };
     driver.ondevinfo = (devInfo: DeviceInfo) => {
       dispatch({ type: "SET_DEVICE_INFO", value: devInfo });
       if (devInfo.hardware) {
@@ -1126,8 +1140,13 @@ function Root() {
 
       const reader = new FileReader();
       reader.onload = () => {
-        dispatch(setPaths(readSvg(reader.result as string)));
-        setIsLoadingFile(false);
+        try {
+          dispatch(setPaths(readSvg(reader.result as string)));
+        } catch (error) {
+          alert(error instanceof Error ? error.message : String(error));
+        } finally {
+          setIsLoadingFile(false);
+        }
       };
       reader.onerror = () => {
         setIsLoadingFile(false);
@@ -1154,8 +1173,13 @@ function Root() {
       document.body.classList.remove("dragover");
     };
     const onpaste = (e: ClipboardEvent) => {
-      e.clipboardData?.items[0].getAsString((s) => {
-        dispatch(setPaths(readSvg(s)));
+      e.clipboardData?.items[0]?.getAsString((s) => {
+        if (!s.trimStart().startsWith("<")) return;
+        try {
+          dispatch(setPaths(readSvg(s)));
+        } catch (error) {
+          alert(error instanceof Error ? error.message : String(error));
+        }
       });
     };
     document.body.addEventListener("drop", ondrop);
@@ -1176,7 +1200,7 @@ function Root() {
     return new Date();
   }, [state.progress, state.paused]);
 
-  const previewArea = useRef(null);
+  const previewArea = useRef<HTMLDivElement>(null);
   const previewSize = useComponentSize(previewArea);
   const showDragTarget = !plan && !isLoadingFile && !isPlanning;
 
@@ -1207,7 +1231,7 @@ function Root() {
           <div className="section-header">pen</div>
           <div className="section-body">
             <PenHeight state={state} driver={driver} />
-            <MotorControl driver={driver} />
+            <MotorControl driver={driver} plotting={state.progress !== null} />
             <HardwareOptions state={state} driver={driver} />
             <ResetToDefaultsButton />
           </div>
@@ -1268,7 +1292,7 @@ function DragTarget({ handleFile }: { handleFile: (file: File) => void }) {
     <div className="drag-target">
       <div className="drag-target-message">
         <span>Drag SVG here or</span>
-        <button type="button" onClick={() => fileInputRef.current.click()}>
+        <button type="button" onClick={() => fileInputRef.current?.click()}>
           Upload SVG
         </button>{" "}
         {/* the input for the system file picker can't be styled, so hide it and use this button*/}
@@ -1298,6 +1322,8 @@ function readSvg(svgString: string): Path[] {
   const doc = parser.parseFromString(svgString, "image/svg+xml");
 
   const svg = doc.querySelector("svg");
+  if (!svg || doc.querySelector("parsererror")) throw new Error("The file is not a valid SVG drawing");
+  const clean = sanitizeSvg(svg, document);
   // flattenSVG relies on getCTM(), which returns null on elements that aren't
   // part of a rendered document. Without it, the viewBox -> width/height
   // scaling is lost and drawings with a viewBox come out the wrong size, so
@@ -1307,8 +1333,8 @@ function readSvg(svgString: string): Path[] {
   container.style.left = "99999px";
   document.body.appendChild(container);
   try {
-    container.appendChild(document.importNode(svg, true));
-    return flattenSVG(container.querySelector("svg"));
+    container.appendChild(clean);
+    return flattenSVG(clean);
   } finally {
     container.remove();
   }

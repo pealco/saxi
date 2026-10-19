@@ -1,3 +1,1 @@
-import server from "./dist/server/server.js";
-
-export { server };
+export { startServer as server } from "./dist/server/server.js";
