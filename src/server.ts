@@ -6,7 +6,6 @@
  */
 
 import http from "node:http";
-import { timingSafeEqual } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,29 +54,14 @@ export async function startServer(
   maxPayloadSize = "200mb",
 ) {
   const app = express();
-  const password = process.env.SAXI_TOKEN;
-  if (enableCors && !password) throw new Error("Cross-origin access requires SAXI_TOKEN");
-  const credentials = password ? Buffer.from(`Basic ${Buffer.from(`saxi:${password}`).toString("base64")}`) : null;
-  function authorize(req: http.IncomingMessage): number {
-    const host = req.headers.host;
-    if (!host) return 403;
-    if (!password && !/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(host)) return 403;
-    const origin = req.headers.origin;
-    if (origin && !(enableCors && password)) {
-      if (origin !== `http://${host}`) return 403;
-    }
-    if (credentials) {
-      const supplied = Buffer.from(req.headers.authorization ?? "");
-      if (supplied.length !== credentials.length || !timingSafeEqual(supplied, credentials)) return 401;
-    }
-    return 200;
+  function isAllowedOrigin(req: http.IncomingMessage): boolean {
+    const { host, origin } = req.headers;
+    return !!host && (!origin || enableCors || origin === `http://${host}`);
   }
   if (enableCors) app.use(cors());
   app.use((req, res, next) => {
-    const status = authorize(req);
-    if (status === 200) return next();
-    if (status === 401) res.setHeader("WWW-Authenticate", 'Basic realm="saxi", charset="UTF-8"');
-    res.status(status).send(status === 401 ? "Authentication required" : "Origin or host not allowed");
+    if (isAllowedOrigin(req)) return next();
+    res.status(403).send("Origin or host not allowed");
   });
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   app.use("/", express.static(path.join(__dirname, "..", "ui")));
@@ -86,9 +70,8 @@ export async function startServer(
   const server = http.createServer(app);
   const wss = new WebSocketServer({ noServer: true });
   server.on("upgrade", (req, socket, head) => {
-    const status = authorize(req);
-    if (status !== 200) {
-      socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\n\r\n`);
+    if (!isAllowedOrigin(req)) {
+      socket.end("HTTP/1.1 403 Rejected\r\nConnection: close\r\n\r\n");
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
@@ -305,7 +288,7 @@ export async function startServer(
 
   return new Promise<http.Server>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, password ? "0.0.0.0" : "127.0.0.1", () => {
+    server.listen(port, "0.0.0.0", () => {
       async function connect() {
         const devices = ebbs(com, currentHardware);
         for await (const device of devices) {

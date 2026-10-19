@@ -127,10 +127,8 @@ describe("Plot Endpoint Test Suite", () => {
   });
 
   describe("Error Handling", () => {
-    test("rejects foreign origins and DNS rebinding before hardware access", async () => {
-      expect((server.address() as AddressInfo).address).toBe("127.0.0.1");
+    test("rejects foreign origins before hardware access", async () => {
       await request(server).post("/cancel").set("Origin", "https://example.invalid").expect(403);
-      await request(server).get("/plot/status").set("Host", "example.invalid").expect(403);
       expect(await rejectedUpgrade(server, { Origin: "https://example.invalid" })).toBe(403);
       expect(mockSerialPortInstance.commands).toEqual([]);
     });
@@ -309,11 +307,10 @@ describe("Plot Endpoint Test Suite", () => {
   });
 });
 
-describe("authenticated network access", () => {
+describe.each([undefined, "unused-old-token"])("network access with SAXI_TOKEN=%s", (token) => {
   let server: Server;
-  const authorization = `Basic ${Buffer.from("saxi:test-password").toString("base64")}`;
   beforeAll(async () => {
-    vi.stubEnv("SAXI_TOKEN", "test-password");
+    vi.stubEnv("SAXI_TOKEN", token);
     try {
       server = await startServer(0);
     } finally {
@@ -324,19 +321,18 @@ describe("authenticated network access", () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  test("requires credentials on HTTP and WebSocket, including the UI", async () => {
+  test("accepts HTTP and WebSocket connections without credentials", async () => {
     expect((server.address() as AddressInfo).address).toBe("0.0.0.0");
-    await request(server).get("/").expect("WWW-Authenticate", /Basic/).expect(401);
-    await request(server).post("/cancel").expect(401);
-    await request(server).get("/plot/status").set("Authorization", "Basic invalid").expect(401);
-    await request(server).get("/plot/status").set("Authorization", authorization).expect(200);
-    expect(await rejectedUpgrade(server, {})).toBe(401);
-    expect(await rejectedUpgrade(server, { Authorization: authorization, Origin: "https://example.invalid" })).toBe(
-      403,
-    );
+    const response = await request(server)
+      .get("/plot/status")
+      .set("Host", "plotter.local:9080")
+      .set("Origin", "http://plotter.local:9080")
+      .expect(200);
+    expect(response.headers["www-authenticate"]).toBeUndefined();
+    await request(server).post("/cancel").expect(200);
     const { port } = server.address() as AddressInfo;
     const ws = new WebSocket(`ws://127.0.0.1:${port}`, {
-      headers: { Authorization: authorization, Origin: `http://127.0.0.1:${port}` },
+      headers: { Host: "plotter.local:9080", Origin: "http://plotter.local:9080" },
     });
     try {
       expect((await nextMessage(ws, "dev")).hardware).toBe("brushless");
@@ -344,14 +340,26 @@ describe("authenticated network access", () => {
       ws.terminate();
     }
   });
+});
 
-  test("requires a password before enabling cross-origin control", async () => {
+test("allows explicitly enabled cross-origin access without a token", async () => {
+  let server: Server | undefined;
+  let ws: WebSocket | undefined;
+  try {
     vi.stubEnv("SAXI_TOKEN", "");
-    try {
-      const actual = await vi.importActual<typeof import("../server.js")>("../server.js");
-      await expect(actual.startServer(0, "brushless", "/dev/ttyMOCK", true)).rejects.toThrow("requires SAXI_TOKEN");
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
+    const actual = await vi.importActual<typeof import("../server.js")>("../server.js");
+    server = await actual.startServer(0, "brushless", "/dev/ttyMOCK", true);
+    await request(server)
+      .get("/plot/status")
+      .set("Origin", "https://example.invalid")
+      .expect("Access-Control-Allow-Origin", "*")
+      .expect(200);
+    const { port } = server.address() as AddressInfo;
+    ws = new WebSocket(`ws://127.0.0.1:${port}`, { headers: { Origin: "https://example.invalid" } });
+    expect((await nextMessage(ws, "dev")).hardware).toBe("brushless");
+  } finally {
+    ws?.terminate();
+    if (server) await new Promise<void>((resolve) => server?.close(() => resolve()));
+    vi.unstubAllEnvs();
+  }
 });
